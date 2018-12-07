@@ -6,7 +6,7 @@ import com.google.protobuf.CodedInputStream
 import jnr.unixsocket.{UnixSocketAddress, UnixSocketChannel}
 import models.Person
 
-object Hello extends App {
+object Main extends App {
   val socketPath = args(0)
   val name = args(1)
   val age = args(2).toInt
