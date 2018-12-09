@@ -1,10 +1,13 @@
 package example
 
+import java.io.InputStream
 import java.nio.channels.Channels
+import java.nio.{ByteBuffer, ByteOrder}
 
-import com.google.protobuf.CodedInputStream
 import jnr.unixsocket.{UnixSocketAddress, UnixSocketChannel}
 import models.Person
+
+import scala.util.{Failure, Success, Try}
 
 object Main extends App {
   val socketPath = args(0)
@@ -18,27 +21,50 @@ object Main extends App {
     System.exit(-1);
   } else {
     val socketAddr = new UnixSocketAddress(path)
-    val channel = UnixSocketChannel.open(socketAddr)
-    System.out.println(s"Connected to socket ${channel.getRemoteSocketAddress}.")
-
-    writePerson(channel, person)
-    val receivedPerson = readPerson(channel)
-
-    System.out.println(s"Person received is the same as sent: ${person == receivedPerson}")
+    for {
+      channel <- openChannel(socketAddr)
+      _ = println(s"Connected to socket ${channel.getRemoteSocketAddress}.")
+      _ <- writePerson(channel, person)
+      receivedPerson <- read(channel)
+      _ = println(s"Person received: $receivedPerson")
+      _ = println(s"Person received is the same as sent: ${person == receivedPerson}")
+    } yield ()
   }
 
-  def readPerson(channel: UnixSocketChannel): Person = {
-    val ir = Channels.newInputStream(channel)
-    val is = CodedInputStream.newInstance(ir)
-    val receivedPerson = person.mergeFrom(is)
-    receivedPerson
+  def openChannel(socketAddr: UnixSocketAddress): Try[UnixSocketChannel] =
+    Try(UnixSocketChannel.open(socketAddr))
+
+  private def readSize(is: InputStream): Try[Int] = {
+    val stream = Stream.continually(is.read())
+    try {
+      val byteBuff = ByteBuffer.allocate(32).order(ByteOrder.LITTLE_ENDIAN)
+      val _ = stream.take(4).foreach(byteBuff.putInt(_))
+      Success(byteBuff.getInt(0))
+    } catch {
+      case ex: Exception => Failure(ex)
+    }
   }
 
-  def writePerson(channel: UnixSocketChannel, person: Person): Unit = {
-    val os = Channels.newOutputStream(channel)
-    person.writeTo(os)
-    System.out.println("Message sent.")
-    os.flush()
+  private def readPerson(is: InputStream, size: Int): Try[Person] = {
+    val stream = Stream.continually(is.read())
+    Try(Person.parseFrom(stream.take(size).map(el => el.asInstanceOf[Byte]).toArray))
   }
+
+  def read(channel: UnixSocketChannel): Try[Person] = {
+    val is = Channels.newInputStream(channel)
+    for {
+      size <- readSize(is)
+      person <- readPerson(is, size)
+    } yield person
+  }
+
+  def writePerson(channel: UnixSocketChannel, person: Person): Try[Unit] = for {
+    os <- Try(Channels.newOutputStream(channel))
+    size = person.serializedSize
+    bb <- Try(ByteBuffer.allocate(4 + size)).map(_.order(ByteOrder.LITTLE_ENDIAN))
+    _ <- Try(bb.putInt(size))
+    _ <- Try(bb.put(person.toByteArray))
+    _ <- Try(os.write(bb.array()))
+  } yield ()
 
 }
